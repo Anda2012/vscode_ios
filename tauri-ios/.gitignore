@@ -1,0 +1,7 @@
+node_modules/
+app-icon.png
+src-tauri/web/*
+!src-tauri/web/.gitkeep
+src-tauri/gen/
+src-tauri/target/
+src-tauri/icons/

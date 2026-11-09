@@ -1,0 +1,71 @@
+name: iOS Tauri unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and stage vscode-web
+        run: tauri-ios/scripts/build-web.sh
+
+      - name: Tauri dependencies and icons
+        working-directory: tauri-ios
+        run: |
+          npm install
+          python3 scripts/make-icon.py app-icon.png
+          npx tauri icon app-icon.png
+
+      - name: Initialize Tauri iOS
+        working-directory: tauri-ios
+        run: npx tauri ios init --ci
+
+      - name: Build iOS app (unsigned)
+        working-directory: tauri-ios
+        env:
+          CI: "true"
+        run: npx tauri ios build --target aarch64 --no-sign --verbose
+
+      - name: Locate built app
+        run: |
+          APP_PATH=$(find tauri-ios/src-tauri/gen/apple -maxdepth 6 -name "*.app" -type d -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found"; find tauri-ios/src-tauri/gen/apple -maxdepth 6 -print; exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+      - name: Package unsigned IPA
+        run: |
+          PAYLOAD_DIR="$RUNNER_TEMP/Payload"
+          IPA_PATH="$RUNNER_TEMP/VSCode-iOS-Unsigned.ipa"
+          rm -rf "$PAYLOAD_DIR" "$IPA_PATH"
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          (cd "$RUNNER_TEMP" && zip -qr "$IPA_PATH" Payload)
+          unzip -l "$IPA_PATH" | tail -3
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VSCode-iOS-Unsigned
+          path: ${{ env.IPA_PATH }}
+          retention-days: 14
