@@ -5,9 +5,13 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 
 use percent_encoding::percent_decode_str;
+
+/// Recent non-200 responses, exposed at /__log to help debug a workbench that fails to load.
+static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Fixed port keeps the page origin stable so IndexedDB / localStorage persist across launches.
 pub const PREFERRED_PORT: u16 = 38621;
@@ -39,7 +43,21 @@ fn handle(mut stream: TcpStream, root: Option<&Path>) {
     let (status, mime, body) = if method != "GET" && method != "HEAD" {
         (405, "text/plain".to_string(), b"Method Not Allowed".to_vec())
     } else {
-        serve(root, target.split('?').next().unwrap_or("/"))
+        let path = target.split('?').next().unwrap_or("/");
+        if path == "/__log" {
+            let log = LOG.lock().map(|l| l.join("\n")).unwrap_or_default();
+            (200, "text/plain".to_string(), log.into_bytes())
+        } else {
+            let r = serve(root, path);
+            if r.0 != 200 {
+                if let Ok(mut l) = LOG.lock() {
+                    if l.len() < 300 {
+                        l.push(format!("{} {}", r.0, path));
+                    }
+                }
+            }
+            r
+        }
     };
 
     let reason = match status {
