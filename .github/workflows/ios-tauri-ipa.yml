@@ -7,6 +7,9 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 150
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
