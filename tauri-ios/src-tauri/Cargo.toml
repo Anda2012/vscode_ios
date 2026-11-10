@@ -14,3 +14,4 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 mime_guess = "2"
 percent-encoding = "2"
+serde_json = "1"

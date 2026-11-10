@@ -32,7 +32,15 @@ html = html.replace(/<link rel="stylesheet" href="[^"]*workbench\/workbench\.css
 html = html.replace(/<script type="module" src="[^"]*code\/browser\/workbench\/workbench\.js"><\/script>/,
   () => `<script type="module">
 import('/out/vs/workbench/workbench.web.main.internal.js').then(function (m) {
-  m.create(document.body, ${JSON.stringify(config)});
+  var cfg = ${JSON.stringify(config)};
+  // ios-fs-ext (served by the app) lets the workbench browse <Documents>/Linux and /Documents.
+  cfg.additionalBuiltinExtensions = [{ scheme: location.protocol.replace(':', ''), authority: location.host, path: '/ios-fs-ext' }];
+  cfg.workspaceProvider = {
+    workspace: { folderUri: m.URI.from({ scheme: 'ios', path: '/' }) },
+    trusted: true,
+    open: function () { return Promise.resolve(false); }
+  };
+  m.create(document.body, cfg);
   var f = document.getElementById('vscode-startup-fallback'); if (f) { f.remove(); }
 }).catch(function (e) { console.error('BOOT FAILED ' + (e && (e.stack || e.message) || e)); });
 </script>`);

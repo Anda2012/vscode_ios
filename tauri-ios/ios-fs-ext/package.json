@@ -1,0 +1,14 @@
+{
+  "name": "ios-files",
+  "displayName": "iOS Files",
+  "description": "Exposes the app's Linux and Documents folders (visible in the Files app) to the workbench.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": { "vscode": "^1.80.0" },
+  "browser": "./extension.js",
+  "activationEvents": ["onFileSystem:ios"],
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": { "supported": true }
+  }
+}

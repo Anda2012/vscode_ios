@@ -35,7 +35,7 @@ jobs:
         working-directory: tauri-ios
         run: |
           npm install
-          python3 scripts/make-icon.py app-icon.png
+          cp ../resources/linux/code.png app-icon.png   # Code - OSS icon from this repo
           npx tauri icon app-icon.png
 
       - name: Initialize Tauri iOS
@@ -59,7 +59,7 @@ jobs:
       - name: Package unsigned IPA
         run: |
           PAYLOAD_DIR="$RUNNER_TEMP/Payload"
-          IPA_PATH="$RUNNER_TEMP/VSCode-iOS-Unsigned.ipa"
+          IPA_PATH="$RUNNER_TEMP/Vscode-unsigned.ipa"
           rm -rf "$PAYLOAD_DIR" "$IPA_PATH"
           mkdir -p "$PAYLOAD_DIR"
           cp -R "$APP_PATH" "$PAYLOAD_DIR/"
@@ -69,6 +69,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VSCode-iOS-Unsigned
+          name: Vscode-unsigned-ipa
           path: ${{ env.IPA_PATH }}
           retention-days: 14

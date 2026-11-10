@@ -11,5 +11,6 @@ pnpm run gulp vscode-web-min        # output lands in ../vscode-web (build/gulpf
 
 rm -rf "$DEST"
 cp -R "$ROOT/../vscode-web" "$DEST"
+cp -R "$ROOT/tauri-ios/ios-fs-ext" "$DEST/ios-fs-ext"
 node "$ROOT/tauri-ios/scripts/render-index.mjs" "$DEST"
 echo "Staged $(du -sh "$DEST" | cut -f1) into $DEST"
