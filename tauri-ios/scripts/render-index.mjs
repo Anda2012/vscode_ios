@@ -24,6 +24,21 @@ const values = {
 
 let html = template;
 for (const [k, v] of Object.entries(values)) html = html.replaceAll(`{{${k}}}`, v);
+// The standalone `vscode-web` build has no browser shell (code/browser/workbench/workbench.js|css:
+// those only exist in the server-web target). It ships the bundled workbench entry instead, so we
+// boot it ourselves: load workbench.web.main.internal.js and call create().
+html = html.replace(/<link rel="stylesheet" href="[^"]*workbench\/workbench\.css">/,
+  '<link rel="stylesheet" href="/out/vs/workbench/workbench.web.main.internal.css">');
+html = html.replace(/<script type="module" src="[^"]*code\/browser\/workbench\/workbench\.js"><\/script>/,
+  () => `<script type="module">
+import('/out/vs/workbench/workbench.web.main.internal.js').then(function (m) {
+  m.create(document.body, ${JSON.stringify(config)});
+  var f = document.getElementById('vscode-startup-fallback'); if (f) { f.remove(); }
+}).catch(function (e) { console.error('BOOT FAILED ' + (e && (e.stack || e.message) || e)); });
+</script>`);
+html = html.replace('<script type="module" src=""></script>', ''); // empty NLS url: nothing to load
+html = html.split('/resources/server/').join('/'); // icons/manifest are staged at the web root
+
 // Debug overlay: collects page errors and shows them on screen if the workbench never starts.
 const overlay = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'debug-overlay.js'), 'utf8');
 html = html.replace('<head>', () => `<head>\n<script>${overlay}</script>`);
