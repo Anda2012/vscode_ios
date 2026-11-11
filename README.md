@@ -6,7 +6,7 @@ An experimental iOS port of [Code - OSS](https://github.com/microsoft/vscode), p
 
 ## Preview
 
-<!-- Add an iPhone or iPad screenshot here. -->
+![VS Code for iOS preview](images/screenshot111126.PNG)
 
 ## What works
 
@@ -25,7 +25,7 @@ This is a web-based port, not the full desktop application. In particular:
 
 ## Install
 
-There is currently no App Store release. You can build an **unsigned IPA** with the repository's GitHub Actions workflow and sideload it using a compatible tool such as [LiveContainer](https://github.com/khanhduytran0/LiveContainer):
+There is currently no App Store release. You can build an **unsigned IPA** with the repository's GitHub Actions workflow and sideload it using a compatible tool such as [LiveContainer](https://github.com/LiveContainer/LiveContainer) or AltStore.
 
 1. Open the repository's [Actions](https://github.com/Anda2012/vscode_ios/actions) page.
 2. Select **iOS Tauri unsigned IPA**.
@@ -65,10 +65,10 @@ The build produces an unsigned app; signing and installing it on a device requir
 
 ## Contributing and issues
 
-This repository is based on the [Visual Studio Code / Code - OSS](https://github.com/microsoft/vscode) project, with iOS-specific changes and an app wrapper. Contributions focused on making the iOS experience work better are welcome. Please open an [issue](https://github.com/Anda2012/vscode_ios/issues) with reproduction steps for bugs, or submit a pull request.
+This repository is based on the [Visual Studio Code / Code - OSS](https://github.com/microsoft/vscode) project, with iOS-specific changes and an app wrapper. Contributions focused on making the iOS port better are welcome.
 
 For upstream VS Code features and issues unrelated to this iOS port, see [microsoft/vscode](https://github.com/microsoft/vscode).
 
 ## License and attribution
 
-This project is based on Code - OSS and is distributed under the [MIT License](LICENSE.txt). Visual Studio Code and related names and marks are trademarks of Microsoft. This independent iOS port is not affiliated with or endorsed by Microsoft.
+This project is based on Code - OSS and is distributed under the [MIT License](LICENSE.txt). Visual Studio Code and related names and marks are trademarks of Microsoft. This independent iOS port is not an official Microsoft product.
