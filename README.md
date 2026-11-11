@@ -1,3 +1,5 @@
+![Banner](images/Anda2012-vscode_ios-light.png)
+
 # VS Code for iOS
 
 An experimental iOS port of [Code - OSS](https://github.com/microsoft/vscode), packaged as a native app for sideloading. It brings the VS Code web workbench to iPhone and iPad inside a Tauri app.
