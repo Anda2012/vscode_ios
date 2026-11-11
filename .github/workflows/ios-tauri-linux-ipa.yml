@@ -101,6 +101,9 @@ jobs:
           path: tauri-ios/src-tauri/linux
 
       - name: Build and stage vscode-web
+        env:
+          # @vscode/ripgrep's postinstall downloads from GitHub; anonymous requests get rate-limited on shared runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: tauri-ios/scripts/build-web.sh
 
       - name: Tauri dependencies and icons
