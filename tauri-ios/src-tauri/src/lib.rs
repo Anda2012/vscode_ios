@@ -25,6 +25,16 @@ fn prepare_user_folders(app: &AppHandle) -> Option<PathBuf> {
     Some(docs)
 }
 
+fn random_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let a = RandomState::new().build_hasher().finish();
+    let mut h = RandomState::new().build_hasher();
+    h.write_u64(std::process::id() as u64);
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    format!("{:016x}{:016x}", a, h.finish())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -50,9 +60,19 @@ pub fn run() {
                 let tmp = tmp.to_string_lossy().replacen("/private/var/", "/var/", 1);
                 linux::init(linux::Paths { support_dir: support, documents_dir: docs, tmp_dir: PathBuf::from(tmp), rootfs_zip });
             }
-            let port = server::start(web_root(app.handle()), docs, Some(open_url), Some(term))?;
-            let url = format!("http://127.0.0.1:{port}/");
+            let token = random_token();
+            let port = server::start(web_root(app.handle()), docs, Some(open_url), Some(term), token.clone())?;
+            // With the Linux core: open the start page, which boots Ubuntu + VS Code and then switches to it
+            // (falling back to the bundled editor). Without it: straight to the bundled editor.
+            let path = if cfg!(lr_stub) { "" } else { "ios-shell/start.html" };
+            let url = format!("http://127.0.0.1:{port}/{path}");
+            // Pages on other loopback ports (VS Code server) can't call our API directly; give them window.open
+            // via the token-guarded /__open endpoint so links and sign-in pages open in Safari.
+            let script = format!(
+                "(function(){{var T='{token}',P='http://127.0.0.1:{port}';window.open=function(u){{try{{if(u&&/^https:/.test(String(u))){{fetch(P+'/__open?t='+T+'&u='+encodeURIComponent(String(u)),{{mode:'no-cors'}});}}}}catch(e){{}}return null;}};}})();"
+            );
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
+                .initialization_script(script)
                 .build()?;
             Ok(())
         })

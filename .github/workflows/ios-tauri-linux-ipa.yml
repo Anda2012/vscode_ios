@@ -39,6 +39,17 @@ jobs:
           printf 'vscode\n' | sudo tee ubuntu-rootfs/etc/hostname >/dev/null
           printf 'deb http://ports.ubuntu.com/ubuntu-ports noble main universe\n' | sudo tee ubuntu-rootfs/etc/apt/sources.list >/dev/null
           sudo chroot ubuntu-rootfs /bin/sh -c 'apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /usr/share/doc/* /usr/share/man/* /usr/share/info/*'
+
+      - name: Add OpenVSCode Server (Node-based VS Code server, arm64 build with its own Node)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo gitpod-io/openvscode-server --pattern '*linux-arm64.tar.gz' --dir ovs
+          sudo mkdir -p ubuntu-rootfs/opt/openvscode-server
+          sudo tar -xzf ovs/*.tar.gz -C ubuntu-rootfs/opt/openvscode-server --strip-components=1
+
+      - name: Convert to fakefs and zip
+        run: |
           sudo tar --numeric-owner -C ubuntu-rootfs -cf ubuntu.tar .
           lr/build-arm64-linux/tools/fakefsify ubuntu.tar ubuntu-fakefs
           (cd ubuntu-fakefs && zip -qr -X ../ubuntu-fakefs.zip .)

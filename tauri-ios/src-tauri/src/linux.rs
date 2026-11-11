@@ -7,7 +7,7 @@ use std::io;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::server::{ReadResult, Terminal};
 
@@ -29,6 +29,81 @@ struct Out {
 
 static OUTPUTS: Mutex<Option<HashMap<i32, Arc<Out>>>> = Mutex::new(None);
 static STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+// VS Code server inside Ubuntu: (phase, message, url). Phases: "" (not started), starting, ready, fallback.
+static VS: Mutex<(String, String, String)> = Mutex::new((String::new(), String::new(), String::new()));
+
+/// Guest port the VS Code server listens on (guest sockets are real host sockets).
+pub const VS_PORT: u16 = 3000;
+
+fn set_vs(phase: &str, message: &str, url: &str) {
+    *VS.lock().unwrap() = (phase.to_string(), message.to_string(), url.to_string());
+}
+
+fn http_up(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else { return false };
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else { return false };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    if s.write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 16];
+    match s.read(&mut buf) {
+        Ok(n) if n >= 12 => {
+            let line = String::from_utf8_lossy(&buf[..n]);
+            line.starts_with("HTTP/1.") && matches!(&line[9..10], "2" | "3")
+        }
+        _ => false,
+    }
+}
+
+/// Last bytes of a session's buffered output (for error messages).
+fn tail_of(id: i32) -> String {
+    let out = out_for(id);
+    let st = out.state.lock().unwrap();
+    let bytes: Vec<u8> = st.0.iter().rev().take(600).rev().copied().collect();
+    String::from_utf8_lossy(&bytes).replace('\r', "")
+}
+
+fn session_closed(id: i32) -> bool {
+    out_for(id).state.lock().unwrap().1
+}
+
+/// Starts OpenVSCode Server in a hidden Linux session and waits for it to answer on loopback.
+fn start_vscode(documents_dir: &Path) {
+    if documents_dir.join("Linux").join(".use-web-workbench").exists() {
+        set_vs("fallback", "Basic editor selected (Linux/.use-web-workbench exists).", "");
+        return;
+    }
+    let timeout = std::env::var("LR_VS_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(900u64);
+    set_vs("starting", "Starting VS Code inside Ubuntu...", "");
+    let cmd = CString::new(format!(
+        "/opt/openvscode-server/bin/openvscode-server --host 127.0.0.1 --port {VS_PORT} --without-connection-token"
+    ))
+    .unwrap();
+    let id = unsafe { lr_session_open(120, 40, cmd.as_ptr()) };
+    if id < 0 {
+        set_vs("fallback", &format!("Could not start VS Code inside Ubuntu (error {id})."), "");
+        return;
+    }
+    let started = Instant::now();
+    loop {
+        if http_up(VS_PORT) {
+            set_vs("ready", "", &format!("http://127.0.0.1:{VS_PORT}/?folder=/mnt/vscode"));
+            return;
+        }
+        if session_closed(id) {
+            set_vs("fallback", &format!("VS Code inside Ubuntu exited.\n{}", tail_of(id)), "");
+            return;
+        }
+        if started.elapsed() > Duration::from_secs(timeout) {
+            set_vs("fallback", &format!("VS Code inside Ubuntu did not start within {} minutes.\n{}", timeout / 60, tail_of(id)), "");
+            return;
+        }
+        set_vs("starting", &format!("Starting VS Code inside Ubuntu... {}s\n(first start can take several minutes)", started.elapsed().as_secs()), "");
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
 
 fn set_state(state: &str, message: &str) {
     *STATE.lock().unwrap() = (state.to_string(), message.to_string());
@@ -89,6 +164,11 @@ pub fn init(paths: Paths) {
         if cfg!(lr_stub) {
             let _ = unsafe { lr_boot(std::ptr::null(), std::ptr::null(), std::ptr::null(), Some(on_output), std::ptr::null_mut()) };
             set_state("ready", "stub (no Linux core in this build)");
+            if std::env::var("LR_FORCE_VS").is_ok() { // tests only
+                start_vscode(&paths.documents_dir);
+            } else {
+                set_vs("fallback", "No Linux core in this build.", "");
+            }
             return;
         }
         let rootfs = paths.support_dir.join("ubuntu-fakefs");
@@ -126,6 +206,7 @@ pub fn init(paths: Paths) {
             set_state("error", &format!("Linux core failed to start (error {rc})"));
         } else {
             set_state("ready", "ok");
+            start_vscode(&paths.documents_dir);
         }
     });
 }
@@ -136,6 +217,18 @@ impl Terminal for Linux {
     fn status(&self) -> (String, String) {
         let s = STATE.lock().unwrap().clone();
         if s.0.is_empty() { ("starting".into(), String::new()) } else { s }
+    }
+
+    fn boot_status(&self) -> (String, String, String) {
+        let vs = VS.lock().unwrap().clone();
+        if !vs.0.is_empty() {
+            return vs;
+        }
+        let st = self.status();
+        match st.0.as_str() {
+            "error" | "no-rootfs" => ("fallback".into(), st.1, String::new()),
+            _ => ("starting".into(), if st.1.is_empty() { "Starting Linux...".into() } else { st.1 }, String::new()),
+        }
     }
 
     fn open(&self, cols: u16, rows: u16) -> Result<i32, String> {

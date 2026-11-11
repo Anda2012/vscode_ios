@@ -3,6 +3,7 @@
 ## What is implemented (all untested on a device)
 * `linux/lr_embed.c` - embedding shim on LinuxRunner's core (boot, ptys, resize, bind mounts). It compiles
   against the core's real headers (checked on x86 with the flags meson generates), but it has never run.
+* `ios-shell/start.html` - start page: boots Ubuntu + VS Code server, then opens it (falls back to the bundled editor).
 * `linux/lr_stub.c` - tiny stand-in used when the core is not built in, so the rest can be tested.
 * `src-tauri/src/linux.rs` - first-launch rootfs install (unzip), boot, session output queues.
 * `src-tauri/src/server.rs` - `/__fs/term-*` endpoints (open, long-poll read, write, resize, close).

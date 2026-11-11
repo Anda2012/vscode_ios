@@ -36,6 +36,8 @@ pub enum ReadResult {
 /// The Linux terminal backend (implemented in linux.rs; mocked in tests).
 pub trait Terminal: Send + Sync {
     fn status(&self) -> (String, String);
+    /// (phase, message, url): phase is starting | ready | fallback.
+    fn boot_status(&self) -> (String, String, String);
     fn open(&self, cols: u16, rows: u16) -> Result<i32, String>;
     fn read(&self, id: i32, wait: Duration) -> ReadResult;
     fn write(&self, id: i32, data: &[u8]) -> Result<(), String>;
@@ -48,6 +50,7 @@ struct Ctx {
     fs_root: Option<PathBuf>,
     open_url: Option<OpenUrl>,
     term: Option<Arc<dyn Terminal>>,
+    open_token: String,
     port: u16,
 }
 
@@ -72,11 +75,11 @@ fn text(status: u16, msg: &str) -> Reply {
     reply(status, "text/plain", msg.as_bytes().to_vec())
 }
 
-pub fn start(web_root: Option<PathBuf>, fs_root: Option<PathBuf>, open_url: Option<OpenUrl>, term: Option<Arc<dyn Terminal>>) -> std::io::Result<u16> {
+pub fn start(web_root: Option<PathBuf>, fs_root: Option<PathBuf>, open_url: Option<OpenUrl>, term: Option<Arc<dyn Terminal>>, open_token: String) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", PREFERRED_PORT))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))?;
     let port = listener.local_addr()?.port();
-    let ctx = Arc::new(Ctx { web_root, fs_root, open_url, term, port });
+    let ctx = Arc::new(Ctx { web_root, fs_root, open_url, term, open_token, port });
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let ctx = ctx.clone();
@@ -142,6 +145,15 @@ fn handle(mut stream: TcpStream, ctx: &Ctx) {
 
     let r = if path.starts_with("/__fs/") {
         api(ctx, &req, &path["/__fs/".len()..], &query)
+    } else if path == "/__open" && req.method == "GET" {
+        // Used by pages served from other loopback ports (the VS Code server): a per-launch token stands in
+        // for the custom header, because a simple cross-origin request can't carry one.
+        let q = parse_query(&query);
+        let ok = q.get("t").map(|t| *t == ctx.open_token).unwrap_or(false);
+        match (ok, q.get("u"), &ctx.open_url) {
+            (true, Some(u), Some(open)) if u.starts_with("https://") => { open(u.clone()); text(200, "ok") }
+            _ => text(403, "Forbidden"),
+        }
     } else if req.method != "GET" && req.method != "HEAD" {
         text(405, "Method Not Allowed")
     } else if path == "/__log" {
@@ -294,6 +306,10 @@ fn terminal_api(ctx: &Ctx, req: &Request, op: &str, q: &HashMap<String, String>)
     let num = |k: &str, default: u32| q.get(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(default);
     let id = q.get("id").and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
     match (req.method.as_str(), op) {
+        ("GET", "boot-status") => {
+            let (phase, message, url) = term.boot_status();
+            reply(200, "application/json", json!({"phase": phase, "message": message, "url": url}).to_string().into_bytes())
+        }
         ("GET", "term-status") => {
             let (state, message) = term.status();
             reply(200, "application/json", json!({"state": state, "message": message}).to_string().into_bytes())
@@ -350,7 +366,7 @@ fn api(ctx: &Ctx, req: &Request, op: &str, query: &str) -> Reply {
     }
 
     let q = parse_query(query);
-    if op.starts_with("term-") {
+    if op.starts_with("term-") || op == "boot-status" {
         return terminal_api(ctx, req, op, &q);
     }
     let Some(fs_root) = ctx.fs_root.as_deref() else {
