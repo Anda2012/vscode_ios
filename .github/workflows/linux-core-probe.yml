@@ -42,6 +42,18 @@ jobs:
           printf 'vscode\n' | sudo tee ubuntu-rootfs/etc/hostname >/dev/null
           printf 'deb http://ports.ubuntu.com/ubuntu-ports noble main universe\n' | sudo tee ubuntu-rootfs/etc/apt/sources.list >/dev/null
           sudo chroot ubuntu-rootfs /bin/sh -c 'apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /usr/share/doc/* /usr/share/man/* /usr/share/info/*'
+
+      - name: Add OpenVSCode Server (Node-based VS Code server, arm64 build with its own Node)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo gitpod-io/openvscode-server --pattern '*linux-arm64.tar.gz' --dir ovs
+          sudo mkdir -p ubuntu-rootfs/opt/openvscode-server
+          sudo tar -xzf ovs/*.tar.gz -C ubuntu-rootfs/opt/openvscode-server --strip-components=1
+          ls ubuntu-rootfs/opt/openvscode-server | head
+
+      - name: Convert to fakefs and zip
+        run: |
           sudo tar --numeric-owner -C ubuntu-rootfs -cf ubuntu.tar .
           lr/build-arm64-linux/tools/fakefsify ubuntu.tar ubuntu-fakefs
           (cd ubuntu-fakefs && zip -qr -X ../ubuntu-fakefs.zip .)
@@ -95,7 +107,7 @@ jobs:
           run() { echo; echo "### $1"; shift; s=$(date +%s); gtimeout 900 "$ISH" -f "$ROOT" /bin/bash -c "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; $*" 2>&1 || echo "[FAILED rc=$?]"; echo "[$(( $(date +%s) - s ))s]"; }
           brew install coreutils >/dev/null 2>&1 || true
           {
-            echo "# Ubuntu arm64 on LinuxRunner probe (macOS arm64 host, interpreter only)"; cat sizes.txt
+            echo "# Ubuntu arm64 + Node + VS Code server on LinuxRunner probe (macOS arm64 host, interpreter only)"; cat sizes.txt
             run "os-release"        'cat /etc/os-release | head -4; uname -a'
             run "bash + python"     'bash --version | head -1; python3 --version'
             run "shell loop speed"  'i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done; echo done'
@@ -104,6 +116,10 @@ jobs:
             run "apt update"        'apt-get update 2>&1 | tail -5'
             run "apt install"       'apt-get install -y --no-install-recommends tree 2>&1 | tail -4; tree --version'
             run "background jobs"   'sleep 1 & wait; echo bg-ok'
+            run "node version"      '/opt/openvscode-server/node --version'
+            run "node speed"        "/opt/openvscode-server/node -e 'let s=0;for(let i=0;i<20000000;i++)s+=i%7;console.log(s)'"
+            run "node jitless"      "/opt/openvscode-server/node --jitless -e 'let s=0;for(let i=0;i<2000000;i++)s+=i%7;console.log(s)'"
+            run "VS Code server"    '(/opt/openvscode-server/bin/openvscode-server --host 127.0.0.1 --port 3000 --without-connection-token >/tmp/ovs.log 2>&1 &); t=0; while [ $t -lt 600 ]; do code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/ || true); if [ "$code" = 200 ]; then echo "server answered after ${t}s"; break; fi; sleep 5; t=$((t+5)); done; echo "--- server log"; tail -15 /tmp/ovs.log'
           } | tee report.txt
           cat report.txt >> "$GITHUB_STEP_SUMMARY"
 
