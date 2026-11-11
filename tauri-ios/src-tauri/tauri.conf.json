@@ -1,14 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Vscode",
-  "mainBinaryName": "Vscode",
+  "productName": "VScode",
+  "mainBinaryName": "VScode",
   "version": "0.1.0",
   "identifier": "com.example.vscodeios",
   "build": { "frontendDist": "../frontend" },
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["web"],
+    "resources": ["web", "linux"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

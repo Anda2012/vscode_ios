@@ -1,4 +1,4 @@
-# Vscode on iOS (Tauri shell)
+# VScode on iOS (Tauri shell)
 
 Tauri 2 iOS app that bundles the standalone `vscode-web` build as an app resource and serves it
 to the WKWebView from a loopback-only HTTP server (127.0.0.1:38621) written in Rust. Build pipeline follows

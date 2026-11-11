@@ -1,14 +1,38 @@
 {
   "name": "ios-files",
-  "displayName": "iOS Files",
-  "description": "Exposes the app's Linux and Documents folders (visible in the Files app) to the workbench.",
+  "displayName": "iOS Files and Linux",
+  "description": "Exposes the app's folders and its Ubuntu terminal to the workbench.",
   "version": "0.0.1",
   "publisher": "local",
-  "engines": { "vscode": "^1.80.0" },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
   "browser": "./extension.js",
-  "activationEvents": ["onFileSystem:ios"],
+  "activationEvents": [
+    "onFileSystem:ios",
+    "onTerminalProfile:ios-linux.ubuntu",
+    "onCommand:ios-linux.newTerminal"
+  ],
   "capabilities": {
     "virtualWorkspaces": true,
-    "untrustedWorkspaces": { "supported": true }
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "terminal": {
+      "profiles": [
+        {
+          "id": "ios-linux.ubuntu",
+          "title": "Ubuntu"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ios-linux.newTerminal",
+        "title": "VScode: New Ubuntu Terminal"
+      }
+    ]
   }
 }

@@ -10,7 +10,19 @@ const template = readFileSync(join(webDir, 'out/vs/code/browser/workbench/workbe
 
 const config = {
   enableWorkspaceTrust: true,
-  productConfiguration: { embedderIdentifier: 'ios-tauri-shell' },
+  productConfiguration: {
+    embedderIdentifier: 'ios-tauri-shell',
+    // Without a gallery the Extensions view has nothing to show and is hidden. Open VSX is the open
+    // registry (the Microsoft Marketplace isn't licensed for builds like this).
+    extensionsGallery: {
+      serviceUrl: 'https://open-vsx.org/vscode/gallery',
+      itemUrl: 'https://open-vsx.org/vscode/item',
+      resourceUrlTemplate: 'https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}',
+      controlUrl: '',
+      nlsBaseUrl: '',
+      publisherUrl: '',
+    },
+  },
 };
 
 const values = {
@@ -29,21 +41,10 @@ for (const [k, v] of Object.entries(values)) html = html.replaceAll(`{{${k}}}`, 
 // boot it ourselves: load workbench.web.main.internal.js and call create().
 html = html.replace(/<link rel="stylesheet" href="[^"]*workbench\/workbench\.css">/,
   '<link rel="stylesheet" href="/out/vs/workbench/workbench.web.main.internal.css">');
+const boot = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'boot.js'), 'utf8')
+  .replace('__CONFIG__', () => JSON.stringify(config));
 html = html.replace(/<script type="module" src="[^"]*code\/browser\/workbench\/workbench\.js"><\/script>/,
-  () => `<script type="module">
-import('/out/vs/workbench/workbench.web.main.internal.js').then(function (m) {
-  var cfg = ${JSON.stringify(config)};
-  // ios-fs-ext (served by the app) lets the workbench browse <Documents>/Linux and /Documents.
-  cfg.additionalBuiltinExtensions = [{ scheme: location.protocol.replace(':', ''), authority: location.host, path: '/ios-fs-ext' }];
-  cfg.workspaceProvider = {
-    workspace: { folderUri: m.URI.from({ scheme: 'ios', path: '/' }) },
-    trusted: true,
-    open: function () { return Promise.resolve(false); }
-  };
-  m.create(document.body, cfg);
-  var f = document.getElementById('vscode-startup-fallback'); if (f) { f.remove(); }
-}).catch(function (e) { console.error('BOOT FAILED ' + (e && (e.stack || e.message) || e)); });
-</script>`);
+  () => `<script type="module">\n${boot}\n</script>`);
 html = html.replace('<script type="module" src=""></script>', ''); // empty NLS url: nothing to load
 html = html.split('/resources/server/').join('/'); // icons/manifest are staged at the web root
 

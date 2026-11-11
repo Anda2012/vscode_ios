@@ -1,0 +1,134 @@
+name: iOS Tauri unsigned IPA (with Ubuntu)
+
+# Same app as "iOS Tauri unsigned IPA", plus the Ubuntu arm64 terminal:
+#   job 1 (arm64 Linux): builds an Ubuntu 24.04 root filesystem converted to LinuxRunner's "fakefs" format
+#   job 2 (macOS):       builds LinuxRunner's core for iOS, bundles the root filesystem, builds the IPA
+on:
+  workflow_dispatch:
+
+jobs:
+  rootfs:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Check out LinuxRunner
+        uses: actions/checkout@v4
+        with:
+          repository: mxhm11cr/LinuxRunner
+          path: lr
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build clang lld llvm pkg-config \
+            libarchive-dev libsqlite3-dev python3 debootstrap ubuntu-keyring zip
+
+      - name: Build fakefsify
+        working-directory: lr
+        run: |
+          CC=clang meson setup build-arm64-linux -Dguest_arch=arm64 --buildtype=release
+          ninja -C build-arm64-linux tools/fakefsify
+
+      - name: Make the Ubuntu 24.04 (noble) arm64 root filesystem
+        run: |
+          sudo debootstrap --arch=arm64 --variant=minbase \
+            --include=ca-certificates,curl,bash,coreutils,python3,nano,less,git,openssh-client,procps \
+            noble ubuntu-rootfs http://ports.ubuntu.com/ubuntu-ports
+          sudo mkdir -p ubuntu-rootfs/root ubuntu-rootfs/mnt/vscode
+          printf 'nameserver 1.1.1.1\n' | sudo tee ubuntu-rootfs/etc/resolv.conf >/dev/null
+          printf 'vscode\n' | sudo tee ubuntu-rootfs/etc/hostname >/dev/null
+          printf 'deb http://ports.ubuntu.com/ubuntu-ports noble main universe\n' | sudo tee ubuntu-rootfs/etc/apt/sources.list >/dev/null
+          sudo chroot ubuntu-rootfs /bin/sh -c 'apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /usr/share/doc/* /usr/share/man/* /usr/share/info/*'
+          sudo tar --numeric-owner -C ubuntu-rootfs -cf ubuntu.tar .
+          lr/build-arm64-linux/tools/fakefsify ubuntu.tar ubuntu-fakefs
+          (cd ubuntu-fakefs && zip -qr -X ../ubuntu-fakefs.zip .)
+          ls -la ubuntu-fakefs.zip; du -sh ubuntu-fakefs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-fakefs
+          path: ubuntu-fakefs.zip
+          retention-days: 7
+
+  build:
+    needs: rootfs
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out LinuxRunner
+        uses: actions/checkout@v4
+        with:
+          repository: mxhm11cr/LinuxRunner
+          path: lr
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install build tools
+        run: brew install xcodegen meson ninja
+
+      - name: Build LinuxRunner core for iOS
+        run: |
+          tauri-ios/scripts/build-linux-core.sh lr "$RUNNER_TEMP/linuxcore"
+          echo "LINUXRUNNER_LIB_DIR=$RUNNER_TEMP/linuxcore" >> "$GITHUB_ENV"
+
+      - name: Download the Ubuntu root filesystem
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-fakefs
+          path: tauri-ios/src-tauri/linux
+
+      - name: Build and stage vscode-web
+        run: tauri-ios/scripts/build-web.sh
+
+      - name: Tauri dependencies and icons
+        working-directory: tauri-ios
+        run: |
+          npm install
+          npx tauri icon app-icon.png --ios-color '#0A5A9E'
+
+      - name: Initialize Tauri iOS
+        working-directory: tauri-ios
+        run: npx tauri ios init --ci
+
+      - name: Build iOS app (unsigned)
+        working-directory: tauri-ios
+        env:
+          CI: "true"
+        run: npx tauri ios build --target aarch64 --no-sign --verbose
+
+      - name: Locate built app
+        run: |
+          APP_PATH=$(find tauri-ios/src-tauri/gen/apple -maxdepth 6 -name "*.app" -type d -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found"; find tauri-ios/src-tauri/gen/apple -maxdepth 6 -print; exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+      - name: Package unsigned IPA
+        run: |
+          PAYLOAD_DIR="$RUNNER_TEMP/Payload"
+          IPA_PATH="$RUNNER_TEMP/VScode-Ubuntu-unsigned.ipa"
+          rm -rf "$PAYLOAD_DIR" "$IPA_PATH"
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          (cd "$RUNNER_TEMP" && zip -qr "$IPA_PATH" Payload)
+          unzip -l "$IPA_PATH" | tail -3
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VScode-Ubuntu-unsigned-ipa
+          path: ${{ env.IPA_PATH }}
+          retention-days: 14

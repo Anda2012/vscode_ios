@@ -9,9 +9,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
 mime_guess = "2"
 percent-encoding = "2"
 serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-opener = "2"
+ureq = { version = "2", default-features = false, features = ["tls"] }

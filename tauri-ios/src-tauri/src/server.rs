@@ -1,8 +1,9 @@
 //! Loopback-only HTTP server for the app.
 //!  * serves the bundled `vscode-web` files (a real http origin is required: custom URI schemes have
 //!    an opaque origin in WebKit, which breaks `new URL(..., window.location.origin)`), and
-//!  * exposes `/__fs/*`, a small file API over <Documents>/Linux and <Documents>/Documents,
-//!    used by the `ios-files` web extension so the workbench can browse those folders.
+//!  * exposes `/__fs/*`: a file API over the app's whole Documents folder (what the Files app shows;
+//!    `Linux` inside it is protected), used by the `ios-files` web extension, plus `open` (hand an
+//!    https URL to Safari) and the GitHub device-flow proxy (github.com/login/* has no CORS).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -10,7 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use percent_encoding::percent_decode_str;
 use serde_json::json;
@@ -22,11 +23,31 @@ static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub const PREFERRED_PORT: u16 = 38621;
 
 const MAX_BODY: usize = 512 * 1024 * 1024;
-const ROOTS: [&str; 2] = ["Linux", "Documents"];
+
+/// Opens an https URL outside the app (Safari).
+pub type OpenUrl = Arc<dyn Fn(String) + Send + Sync>;
+
+pub enum ReadResult {
+    Data(Vec<u8>),
+    Timeout,
+    Closed,
+}
+
+/// The Linux terminal backend (implemented in linux.rs; mocked in tests).
+pub trait Terminal: Send + Sync {
+    fn status(&self) -> (String, String);
+    fn open(&self, cols: u16, rows: u16) -> Result<i32, String>;
+    fn read(&self, id: i32, wait: Duration) -> ReadResult;
+    fn write(&self, id: i32, data: &[u8]) -> Result<(), String>;
+    fn resize(&self, id: i32, cols: u16, rows: u16) -> Result<(), String>;
+    fn close(&self, id: i32);
+}
 
 struct Ctx {
     web_root: Option<PathBuf>,
     fs_root: Option<PathBuf>,
+    open_url: Option<OpenUrl>,
+    term: Option<Arc<dyn Terminal>>,
     port: u16,
 }
 
@@ -51,11 +72,11 @@ fn text(status: u16, msg: &str) -> Reply {
     reply(status, "text/plain", msg.as_bytes().to_vec())
 }
 
-pub fn start(web_root: Option<PathBuf>, fs_root: Option<PathBuf>) -> std::io::Result<u16> {
+pub fn start(web_root: Option<PathBuf>, fs_root: Option<PathBuf>, open_url: Option<OpenUrl>, term: Option<Arc<dyn Terminal>>) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", PREFERRED_PORT))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))?;
     let port = listener.local_addr()?.port();
-    let ctx = Arc::new(Ctx { web_root, fs_root, port });
+    let ctx = Arc::new(Ctx { web_root, fs_root, open_url, term, port });
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let ctx = ctx.clone();
@@ -140,11 +161,14 @@ fn handle(mut stream: TcpStream, ctx: &Ctx) {
 
     let reason = match r.status {
         200 => "OK",
+        204 => "No Content",
+        410 => "Gone",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        502 => "Bad Gateway",
         _ => "Error",
     };
     let head = format!(
@@ -186,9 +210,15 @@ fn parse_query(q: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Maps a workbench path like "/Linux/projects/a.txt" onto the real folder. Only the two top-level
-/// folders are reachable. Returns the real path and how many path components were given.
-fn resolve(fs_root: &Path, p: &str) -> Result<(PathBuf, usize), u16> {
+struct Resolved {
+    real: PathBuf,
+    depth: usize,
+    top: Option<String>,
+}
+
+/// Maps a workbench path like "/Linux/projects/a.txt" onto the real folder under the Documents root.
+/// Anything that would leave the root (`..`, absolute tricks) is refused.
+fn resolve(fs_root: &Path, p: &str) -> Result<Resolved, u16> {
     let mut comps: Vec<std::ffi::OsString> = Vec::new();
     for c in Path::new(p.trim_start_matches('/')).components() {
         match c {
@@ -197,13 +227,15 @@ fn resolve(fs_root: &Path, p: &str) -> Result<(PathBuf, usize), u16> {
             _ => return Err(403),
         }
     }
-    if let Some(first) = comps.first() {
-        if !ROOTS.iter().any(|r| first.to_string_lossy() == *r) {
-            return Err(403);
-        }
-    }
+    let top = comps.first().map(|c| c.to_string_lossy().to_string());
     let real = comps.iter().fold(fs_root.to_path_buf(), |a, c| a.join(c));
-    Ok((real, comps.len()))
+    Ok(Resolved { real, depth: comps.len(), top })
+}
+
+/// The root itself and the `Linux` folder (the Linux root filesystem, later) can't be deleted,
+/// renamed over, or replaced.
+fn protected(r: &Resolved) -> bool {
+    r.depth == 0 || (r.depth == 1 && r.top.as_deref() == Some("Linux"))
 }
 
 fn status_of(e: &std::io::Error) -> u16 {
@@ -236,6 +268,61 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
     if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) }
 }
 
+fn proxy_post(url: &str, body: &[u8]) -> Reply {
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+    let result = agent
+        .post(url)
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_bytes(body);
+    let resp = match result {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return text(502, &e.to_string()),
+    };
+    let mut buf = Vec::new();
+    if resp.into_reader().take(1 << 20).read_to_end(&mut buf).is_err() {
+        return text(502, "read failed");
+    }
+    reply(200, "application/json", buf)
+}
+
+fn terminal_api(ctx: &Ctx, req: &Request, op: &str, q: &HashMap<String, String>) -> Reply {
+    let Some(term) = ctx.term.as_ref() else {
+        return text(500, "terminal unavailable");
+    };
+    let num = |k: &str, default: u32| q.get(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(default);
+    let id = q.get("id").and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
+    match (req.method.as_str(), op) {
+        ("GET", "term-status") => {
+            let (state, message) = term.status();
+            reply(200, "application/json", json!({"state": state, "message": message}).to_string().into_bytes())
+        }
+        ("POST", "term-open") => match term.open(num("cols", 80).min(1000) as u16, num("rows", 24).min(1000) as u16) {
+            Ok(id) => reply(200, "application/json", json!({"id": id}).to_string().into_bytes()),
+            Err(e) => text(500, &e),
+        },
+        ("GET", "term-read") => match term.read(id, Duration::from_secs(20)) {
+            ReadResult::Data(b) => reply(200, "application/octet-stream", b),
+            ReadResult::Timeout => reply(204, "text/plain", Vec::new()),
+            ReadResult::Closed => reply(410, "text/plain", Vec::new()),
+        },
+        ("POST", "term-write") => match term.write(id, &req.body) {
+            Ok(_) => text(200, "ok"),
+            Err(e) => text(404, &e),
+        },
+        ("POST", "term-resize") => match term.resize(id, num("cols", 80).min(1000) as u16, num("rows", 24).min(1000) as u16) {
+            Ok(_) => text(200, "ok"),
+            Err(e) => text(404, &e),
+        },
+        ("POST", "term-close") => {
+            term.close(id);
+            text(200, "ok")
+        }
+        _ => text(404, "unknown operation"),
+    }
+}
+
 fn api(ctx: &Ctx, req: &Request, op: &str, query: &str) -> Reply {
     // A custom header forces a CORS preflight for cross-site pages (which we never answer), and the
     // Host check blocks DNS-rebinding. Same-origin requests from the workbench pass both.
@@ -243,93 +330,107 @@ fn api(ctx: &Ctx, req: &Request, op: &str, query: &str) -> Reply {
     if !host_ok || !req.headers.contains_key("x-vscode-fs") {
         return text(403, "Forbidden");
     }
+
+    // Operations that don't touch files.
+    match (req.method.as_str(), op) {
+        ("POST", "open") => {
+            let url = String::from_utf8_lossy(&req.body).trim().to_string();
+            if !url.starts_with("https://") {
+                return text(400, "only https URLs");
+            }
+            return match &ctx.open_url {
+                Some(open) => { open(url); text(200, "ok") }
+                None => text(500, "opener unavailable"),
+            };
+        }
+        // Only these two GitHub endpoints are forwarded (not an open proxy).
+        ("POST", "gh-device") => return proxy_post("https://github.com/login/device/code", &req.body),
+        ("POST", "gh-token") => return proxy_post("https://github.com/login/oauth/access_token", &req.body),
+        _ => {}
+    }
+
+    let q = parse_query(query);
+    if op.starts_with("term-") {
+        return terminal_api(ctx, req, op, &q);
+    }
     let Some(fs_root) = ctx.fs_root.as_deref() else {
         return text(500, "Documents folder unavailable");
     };
-    let q = parse_query(query);
     let get = |k: &str| q.get(k).cloned().unwrap_or_default();
-
-    let res = |p: &str| resolve(fs_root, p);
     let io_err = |e: std::io::Error| text(status_of(&e), &e.to_string());
+    let res = |p: &str| resolve(fs_root, p);
+    let json_ok = |v: serde_json::Value| reply(200, "application/json", v.to_string().into_bytes());
 
     match (req.method.as_str(), op) {
         ("GET", "stat") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n == 0 {
-                return reply(200, "application/json", json!({"type": 2, "size": 0, "ctime": 0, "mtime": 0}).to_string().into_bytes());
-            }
-            match std::fs::metadata(&real) {
-                Ok(m) => reply(200, "application/json", json!({
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            match std::fs::metadata(&r.real) {
+                Ok(m) => json_ok(json!({
                     "type": if m.is_dir() { 2 } else { 1 },
                     "size": m.len(),
                     "ctime": ms(m.created()),
                     "mtime": ms(m.modified()),
-                }).to_string().into_bytes()),
+                })),
                 Err(e) => io_err(e),
             }
         }
         ("GET", "list") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n == 0 {
-                let names: Vec<_> = ROOTS.iter().map(|r| json!([r, 2])).collect();
-                return reply(200, "application/json", json!(names).to_string().into_bytes());
-            }
-            match std::fs::read_dir(&real) {
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            match std::fs::read_dir(&r.real) {
                 Ok(rd) => {
                     let mut out = Vec::new();
                     for e in rd.flatten() {
                         let t = if e.path().is_dir() { 2 } else { 1 };
                         out.push(json!([e.file_name().to_string_lossy(), t]));
                     }
-                    reply(200, "application/json", json!(out).to_string().into_bytes())
+                    json_ok(json!(out))
                 }
                 Err(e) => io_err(e),
             }
         }
         ("GET", "read") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n == 0 { return text(403, "denied"); }
-            match std::fs::read(&real) {
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            match std::fs::read(&r.real) {
                 Ok(b) => reply(200, "application/octet-stream", b),
                 Err(e) => io_err(e),
             }
         }
         ("PUT", "write") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n < 2 { return text(403, "denied"); }
-            match std::fs::write(&real, &req.body) {
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            if protected(&r) { return text(403, "denied"); }
+            match std::fs::write(&r.real, &req.body) {
                 Ok(_) => text(200, "ok"),
                 Err(e) => io_err(e),
             }
         }
         ("POST", "mkdir") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n < 2 { return text(403, "denied"); }
-            match std::fs::create_dir(&real) {
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            if protected(&r) { return text(403, "denied"); }
+            match std::fs::create_dir(&r.real) {
                 Ok(_) => text(200, "ok"),
                 Err(e) => io_err(e),
             }
         }
         ("DELETE", "delete") => {
-            let (real, n) = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if n < 2 { return text(403, "denied"); } // never delete Linux / Documents themselves
-            let result = if real.is_dir() {
-                if get("recursive") == "1" { std::fs::remove_dir_all(&real) } else { std::fs::remove_dir(&real) }
+            let r = match res(&get("p")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            if protected(&r) { return text(403, "denied"); }
+            let result = if r.real.is_dir() {
+                if get("recursive") == "1" { std::fs::remove_dir_all(&r.real) } else { std::fs::remove_dir(&r.real) }
             } else {
-                std::fs::remove_file(&real)
+                std::fs::remove_file(&r.real)
             };
             match result { Ok(_) => text(200, "ok"), Err(e) => io_err(e) }
         }
         ("POST", "rename") | ("POST", "copy") => {
-            let (from, nf) = match res(&get("from")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            let (to, nt) = match res(&get("to")) { Ok(v) => v, Err(s) => return text(s, "denied") };
-            if nf < 2 || nt < 2 { return text(403, "denied"); }
-            if !from.exists() { return text(404, "source not found"); }
-            if to.exists() {
+            let from = match res(&get("from")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            let to = match res(&get("to")) { Ok(v) => v, Err(s) => return text(s, "denied") };
+            if protected(&to) || (op == "rename" && protected(&from)) { return text(403, "denied"); }
+            if !from.real.exists() { return text(404, "source not found"); }
+            if to.real.exists() {
                 if get("overwrite") != "1" { return text(409, "exists"); }
-                if let Err(e) = remove_any(&to) { return io_err(e); }
+                if let Err(e) = remove_any(&to.real) { return io_err(e); }
             }
-            let result = if op == "rename" { std::fs::rename(&from, &to) } else { copy_recursive(&from, &to) };
+            let result = if op == "rename" { std::fs::rename(&from.real, &to.real) } else { copy_recursive(&from.real, &to.real) };
             match result { Ok(_) => text(200, "ok"), Err(e) => io_err(e) }
         }
         _ => text(404, "unknown operation"),
