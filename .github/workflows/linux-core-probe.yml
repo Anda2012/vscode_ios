@@ -63,7 +63,7 @@ jobs:
       - name: Check out LinuxRunner
         uses: actions/checkout@v4
         with:
-          repository: mxhm11cr/LinuxRunner
+          repository: Anda2012/LinuxRunner
           path: lr
 
       - uses: actions/download-artifact@v4
