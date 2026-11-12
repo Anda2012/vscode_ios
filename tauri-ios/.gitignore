@@ -6,3 +6,4 @@ src-tauri/target/
 src-tauri/icons/
 src-tauri/linux/*
 !src-tauri/linux/.gitkeep
+src-tauri/linuxlibs/

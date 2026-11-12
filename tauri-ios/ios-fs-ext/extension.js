@@ -155,9 +155,54 @@ class LinuxPty {
   }
 }
 
+async function linuxStatus(base) {
+  const r = await fetch(base + '/term-status', { headers: { 'X-Vscode-Fs': '1' } });
+  return r.json(); // { state, message }
+}
+
 exports.activate = function (context) {
   const e = context.extensionUri; // http://127.0.0.1:<port>/ios-fs-ext
   const base = e.scheme + '://' + e.authority + '/__fs';
+
+  // Status bar buttons: the only way to reach these on an iPad without a keyboard.
+  const terminalItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
+  terminalItem.text = '$(terminal) Ubuntu';
+  terminalItem.tooltip = 'Open an Ubuntu terminal';
+  terminalItem.command = 'ios-linux.newTerminal';
+  terminalItem.show();
+
+  const signInItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 999);
+  signInItem.command = 'ios-linux.signIn';
+  const refreshSignIn = async function () {
+    try {
+      const s = await vscode.authentication.getSession('github', [], { silent: true });
+      signInItem.text = s ? '$(github) ' + s.account.label : '$(github) Sign in';
+      signInItem.tooltip = s ? 'Signed in to GitHub' : 'Sign in to GitHub';
+    } catch (err) {
+      signInItem.text = '$(github) Sign in';
+    }
+    signInItem.show();
+  };
+  refreshSignIn();
+  context.subscriptions.push(terminalItem, signInItem,
+    vscode.authentication.onDidChangeSessions(function (ev) { if (ev.provider.id === 'github') { refreshSignIn(); } }),
+    vscode.commands.registerCommand('ios-linux.signIn', async function () {
+      try {
+        const s = await vscode.authentication.getSession('github', ['read:user', 'user:email'], { createIfNone: true });
+        vscode.window.showInformationMessage('Signed in to GitHub as ' + s.account.label);
+      } catch (err) {
+        vscode.window.showErrorMessage('GitHub sign-in failed: ' + (err && err.message ? err.message : err));
+      }
+      refreshSignIn();
+    }),
+    vscode.commands.registerCommand('ios-linux.status', async function () {
+      try {
+        const s = await linuxStatus(base);
+        vscode.window.showInformationMessage('Linux: ' + s.state + (s.message ? ' - ' + s.message : ''));
+      } catch (err) {
+        vscode.window.showErrorMessage('Linux status unavailable: ' + err);
+      }
+    }));
   context.subscriptions.push(
     vscode.workspace.registerFileSystemProvider('ios', new IosFileSystem(base), { isCaseSensitive: true }),
     vscode.window.registerTerminalProfileProvider('ios-linux.ubuntu', {

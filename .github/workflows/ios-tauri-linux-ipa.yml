@@ -93,6 +93,9 @@ jobs:
         run: |
           tauri-ios/scripts/build-linux-core.sh lr "$RUNNER_TEMP/linuxcore"
           echo "LINUXRUNNER_LIB_DIR=$RUNNER_TEMP/linuxcore" >> "$GITHUB_ENV"
+          mkdir -p tauri-ios/src-tauri/linuxlibs
+          cp "$RUNNER_TEMP"/linuxcore/*.a tauri-ios/src-tauri/linuxlibs/
+          ls -la tauri-ios/src-tauri/linuxlibs
 
       - name: Download the Ubuntu root filesystem
         uses: actions/download-artifact@v4
@@ -116,11 +119,29 @@ jobs:
         working-directory: tauri-ios
         run: npx tauri ios init --ci
 
+      - name: Link system libraries needed by the Linux core
+        working-directory: tauri-ios/src-tauri/gen/apple
+        run: |
+          python3 ../../../scripts/patch-xcode-project.py project.yml
+          xcodegen generate
+
       - name: Build iOS app (unsigned)
         working-directory: tauri-ios
         env:
           CI: "true"
         run: npx tauri ios build --target aarch64 --no-sign --verbose
+
+      - name: Verify the real Linux core is linked (not the stub)
+        run: |
+          APP=$(find tauri-ios/src-tauri/gen/apple -maxdepth 6 -name "*.app" -type d -print -quit)
+          BIN=$(find "$APP" -maxdepth 1 -type f -perm -u+x -print -quit)
+          echo "binary: $BIN"
+          if strings "$BIN" | grep -q "VScode stub shell"; then
+            echo "ERROR: the stub terminal was linked, not LinuxRunner's core."
+            exit 1
+          fi
+          strings "$BIN" | grep -c "become_first_process\|fakefs" || true
+          echo "OK: the stub terminal is not in the binary."
 
       - name: Locate built app
         run: |

@@ -9,9 +9,12 @@
   },
   "browser": "./extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onFileSystem:ios",
     "onTerminalProfile:ios-linux.ubuntu",
-    "onCommand:ios-linux.newTerminal"
+    "onCommand:ios-linux.newTerminal",
+    "onCommand:ios-linux.signIn",
+    "onCommand:ios-linux.status"
   ],
   "capabilities": {
     "virtualWorkspaces": true,
@@ -32,6 +35,14 @@
       {
         "command": "ios-linux.newTerminal",
         "title": "VScode: New Ubuntu Terminal"
+      },
+      {
+        "command": "ios-linux.signIn",
+        "title": "VScode: Sign in to GitHub"
+      },
+      {
+        "command": "ios-linux.status",
+        "title": "VScode: Linux status"
       }
     ]
   }
