@@ -1,6 +1,7 @@
 // Stand-in for lr_embed.c in builds that don't include LinuxRunner's core (desktop checks, tests).
 // Offers a tiny "shell" so the whole terminal path (extension -> server -> Rust -> C) can be exercised.
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lr_embed.h"
@@ -25,6 +26,14 @@ int lr_session_open(uint16_t cols, uint16_t rows, const char *command) {
     int id = next++;
     open_ids[id % 64] = id;
     pthread_mutex_unlock(&m);
+    if (command && strstr(command, "uname")) {
+        if (!getenv("LR_STUB_HANG")) { say(id, "Linux stub 6.0.0 aarch64\r\n"); if (cb) cb(id, NULL, 0, user); }
+        return id;
+    }
+    if (command && strstr(command, "--version")) {
+        say(id, "v22.0.0-stub\r\n"); if (cb) cb(id, NULL, 0, user);
+        return id;
+    }
     say(id, "VScode stub shell (the Linux core is not part of this build)\r\n$ ");
     return id;
 }

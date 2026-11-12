@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::server::{ReadResult, Terminal};
@@ -31,6 +31,38 @@ static OUTPUTS: Mutex<Option<HashMap<i32, Arc<Out>>>> = Mutex::new(None);
 static STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
 // VS Code server inside Ubuntu: (phase, message, url). Phases: "" (not started), starting, ready, fallback.
 static VS: Mutex<(String, String, String)> = Mutex::new((String::new(), String::new(), String::new()));
+
+static T0: OnceLock<Instant> = OnceLock::new();
+fn since_start() -> u64 {
+    T0.get_or_init(Instant::now).elapsed().as_secs()
+}
+
+// Human-readable trace of what the boot did, shown on the start page (and on failure).
+static LOG: Mutex<String> = Mutex::new(String::new());
+static VS_ID: Mutex<Option<i32>> = Mutex::new(None);
+
+fn log(line: &str) {
+    let mut l = LOG.lock().unwrap();
+    l.push_str(line);
+    l.push('\n');
+    if l.len() > 6000 {
+        let cut = l.len() - 6000;
+        let at = l.char_indices().map(|(i, _)| i).find(|&i| i >= cut).unwrap_or(0);
+        l.drain(..at);
+    }
+}
+
+fn diagnostics() -> String {
+    let mut s = LOG.lock().unwrap().clone();
+    if let Some(id) = *VS_ID.lock().unwrap() {
+        let t = tail_of(id);
+        if !t.trim().is_empty() {
+            s.push_str("--- server output ---\n");
+            s.push_str(t.trim_end());
+        }
+    }
+    s
+}
 
 /// Guest port the VS Code server listens on (guest sockets are real host sockets).
 pub const VS_PORT: u16 = 3000;
@@ -69,6 +101,29 @@ fn session_closed(id: i32) -> bool {
     out_for(id).state.lock().unwrap().1
 }
 
+/// Runs one command to completion in a throwaway session and returns its output.
+fn run_probe(cmd: &str, timeout_secs: u64) -> Result<String, String> {
+    let c = CString::new(cmd).unwrap();
+    let id = unsafe { lr_session_open(100, 30, c.as_ptr()) };
+    if id < 0 {
+        return Err(format!("could not start `{cmd}` (error {id})"));
+    }
+    let started = Instant::now();
+    while !session_closed(id) {
+        if started.elapsed() > Duration::from_secs(timeout_secs) {
+            unsafe { lr_session_close(id) };
+            return Err(format!("`{cmd}` did not finish within {timeout_secs}s. Output so far:\n{}", tail_of(id).trim_end()));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let out = out_for(id);
+    let bytes: Vec<u8> = out.state.lock().unwrap().0.drain(..).collect();
+    if let Some(map) = OUTPUTS.lock().unwrap().as_mut() {
+        map.remove(&id);
+    }
+    Ok(String::from_utf8_lossy(&bytes).replace('\r', ""))
+}
+
 /// Starts OpenVSCode Server in a hidden Linux session and waits for it to answer on loopback.
 fn start_vscode(documents_dir: &Path) {
     if documents_dir.join("Linux").join(".use-web-workbench").exists() {
@@ -76,6 +131,19 @@ fn start_vscode(documents_dir: &Path) {
         return;
     }
     let timeout = std::env::var("LR_VS_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(900u64);
+    let probe_timeout = std::env::var("LR_PROBE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok());
+    for (cmd, secs, what) in [("/bin/uname -a", 90u64, "the Linux layer"), ("/opt/openvscode-server/node --version", 240, "Node.js")] {
+        set_vs("starting", &format!("Checking {what}..."), "");
+        log(&format!("$ {cmd}"));
+        match run_probe(cmd, probe_timeout.unwrap_or(secs)) {
+            Ok(out) => log(out.trim()),
+            Err(e) => {
+                log(&e);
+                set_vs("fallback", &format!("Ubuntu check failed: {what} did not run."), "");
+                return;
+            }
+        }
+    }
     set_vs("starting", "Starting VS Code inside Ubuntu...", "");
     let cmd = CString::new(format!(
         "/opt/openvscode-server/bin/openvscode-server --host 127.0.0.1 --port {VS_PORT} --without-connection-token"
@@ -86,6 +154,8 @@ fn start_vscode(documents_dir: &Path) {
         set_vs("fallback", &format!("Could not start VS Code inside Ubuntu (error {id})."), "");
         return;
     }
+    *VS_ID.lock().unwrap() = Some(id);
+    log("$ openvscode-server (started)");
     let started = Instant::now();
     loop {
         if http_up(VS_PORT) {
@@ -93,11 +163,11 @@ fn start_vscode(documents_dir: &Path) {
             return;
         }
         if session_closed(id) {
-            set_vs("fallback", &format!("VS Code inside Ubuntu exited.\n{}", tail_of(id)), "");
+            set_vs("fallback", "VS Code inside Ubuntu exited.", "");
             return;
         }
         if started.elapsed() > Duration::from_secs(timeout) {
-            set_vs("fallback", &format!("VS Code inside Ubuntu did not start within {} minutes.\n{}", timeout / 60, tail_of(id)), "");
+            set_vs("fallback", &format!("VS Code inside Ubuntu did not start within {timeout} seconds."), "");
             return;
         }
         set_vs("starting", &format!("Starting VS Code inside Ubuntu... {}s\n(first start can take several minutes)", started.elapsed().as_secs()), "");
@@ -132,9 +202,17 @@ extern "C" fn on_output(session: c_int, data: *const u8, len: usize, _user: *mut
 }
 
 pub(crate) fn unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    unzip_with_progress(zip_path, dest, &mut |_, _| {})
+}
+
+fn unzip_with_progress(zip_path: &Path, dest: &Path, progress: &mut dyn FnMut(usize, usize)) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    for i in 0..archive.len() {
+    let total = archive.len();
+    for i in 0..total {
+        if i % 250 == 0 {
+            progress(i, total);
+        }
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let Some(rel) = entry.enclosed_name() else { continue }; // skips ../ tricks
         let target = dest.join(rel);
@@ -160,6 +238,7 @@ pub struct Paths {
 
 /// Installs the rootfs on first launch, then boots the core. Runs on its own thread.
 pub fn init(paths: Paths) {
+    since_start();
     std::thread::spawn(move || {
         if cfg!(lr_stub) {
             let _ = unsafe { lr_boot(std::ptr::null(), std::ptr::null(), std::ptr::null(), Some(on_output), std::ptr::null_mut()) };
@@ -178,9 +257,14 @@ pub fn init(paths: Paths) {
                 return;
             };
             set_state("installing", "Installing Ubuntu (first launch only)...");
+            log("installing the bundled root filesystem");
             let staging = paths.support_dir.join("ubuntu-fakefs.partial");
             let _ = fs::remove_dir_all(&staging);
-            if let Err(e) = fs::create_dir_all(&staging).map_err(|e| e.to_string()).and_then(|_| unzip(&zip_path, &staging)) {
+            if let Err(e) = fs::create_dir_all(&staging).map_err(|e| e.to_string()).and_then(|_| {
+                unzip_with_progress(&zip_path, &staging, &mut |done, total| {
+                    set_state("installing", &format!("Installing Ubuntu (first launch only)... {done} of {total} files"));
+                })
+            }) {
                 set_state("error", &format!("Could not install Ubuntu: {e}"));
                 return;
             }
@@ -190,6 +274,7 @@ pub fn init(paths: Paths) {
             }
         }
 
+        log("root filesystem ready; booting the Linux core");
         set_state("booting", "Starting Ubuntu...");
         let _ = fs::create_dir_all(paths.documents_dir.join("Linux"));
         let binds = format!("/root={}/Linux;/mnt/vscode={}", paths.documents_dir.display(), paths.documents_dir.display());
@@ -205,6 +290,7 @@ pub fn init(paths: Paths) {
         if rc < 0 {
             set_state("error", &format!("Linux core failed to start (error {rc})"));
         } else {
+            log("Linux core booted");
             set_state("ready", "ok");
             start_vscode(&paths.documents_dir);
         }
@@ -220,15 +306,28 @@ impl Terminal for Linux {
     }
 
     fn boot_status(&self) -> (String, String, String) {
-        let vs = VS.lock().unwrap().clone();
-        if !vs.0.is_empty() {
-            return vs;
+        let (phase, message, url) = {
+            let vs = VS.lock().unwrap().clone();
+            if !vs.0.is_empty() {
+                vs
+            } else {
+                let st = self.status();
+                match st.0.as_str() {
+                    "error" | "no-rootfs" => ("fallback".into(), st.1, String::new()),
+                    _ => ("starting".into(), if st.1.is_empty() { "Starting Linux...".into() } else { st.1 }, String::new()),
+                }
+            }
+        };
+        if phase == "ready" {
+            return (phase, message, url);
         }
-        let st = self.status();
-        match st.0.as_str() {
-            "error" | "no-rootfs" => ("fallback".into(), st.1, String::new()),
-            _ => ("starting".into(), if st.1.is_empty() { "Starting Linux...".into() } else { st.1 }, String::new()),
+        let diag = diagnostics();
+        let mut msg = format!("{message}\n[{}s since launch]", since_start());
+        if !diag.trim().is_empty() {
+            msg.push_str("\n\n");
+            msg.push_str(diag.trim_end());
         }
+        (phase, msg, url)
     }
 
     fn open(&self, cols: u16, rows: u16) -> Result<i32, String> {

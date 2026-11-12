@@ -4,7 +4,7 @@
 <title>VScode</title>
 <body style="margin:0;background:#1e1e1e;color:#ccc;font:16px -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;text-align:center">
 <div style="font-size:30px;margin-bottom:12px">VScode</div>
-<div id="msg" style="max-width:560px;padding:0 20px;white-space:pre-wrap">Starting...</div>
+<div id="msg" style="max-width:640px;padding:0 20px;white-space:pre-wrap;text-align:left;font:12px ui-monospace,Menlo,monospace;overflow-wrap:anywhere">Starting...</div>
 <button id="skip" style="margin-top:28px;padding:10px 18px;border:0;border-radius:8px;background:#333;color:#ddd;font:inherit">Use the basic editor now</button>
 <script>
   var H = { 'X-Vscode-Fs': '1' };
@@ -16,8 +16,8 @@
       msg.textContent = s.message || s.phase;
       if (s.phase === 'ready' && s.url) { location.replace(s.url); return; }
       if (s.phase === 'fallback') {
-        msg.textContent = (s.message ? s.message + '\n\n' : '') + 'Opening the basic editor...';
-        setTimeout(function () { location.replace('/index.html'); }, s.message ? 6000 : 0);
+        msg.textContent = (s.message ? s.message + '\n\n' : '') + 'Opening the basic editor in 45 seconds (or tap the button).';
+        setTimeout(function () { location.replace('/index.html'); }, s.message ? 45000 : 0);
         return;
       }
     } catch (e) { /* server not reachable yet */ }
