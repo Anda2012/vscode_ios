@@ -312,6 +312,21 @@ int lr_session_resize(int session, uint16_t cols, uint16_t rows) {
     return 0;
 }
 
+int lr_session_alive(int session) {
+    // Same test the core uses for a "half-closed" pty master: the slave was opened and now only the
+    // master's own reference is left (the process closed its stdio), or the slave was hung up.
+    struct session *s = find_session(session);
+    if (s == NULL || s->tty == NULL)
+        return 0;
+    struct tty *slave = s->tty->pty.other;
+    if (slave == NULL)
+        return 0;
+    lock(&slave->lock);
+    int gone = slave->ever_opened && (slave->refcount == 1 || slave->hung_up);
+    unlock(&slave->lock);
+    return !gone;
+}
+
 void lr_session_close(int session) {
     struct session *s = find_session(session);
     if (s == NULL || s->tty == NULL)

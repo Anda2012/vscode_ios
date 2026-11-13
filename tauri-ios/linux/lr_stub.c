@@ -10,6 +10,7 @@ static lr_output_cb cb;
 static void *user;
 static int next = 1;
 static int open_ids[64];
+static int dead[64]; // simulates a process that exited without any callback
 static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 
 static void say(int id, const char *s) { if (cb) cb(id, (const uint8_t *) s, strlen(s), user); }
@@ -39,6 +40,7 @@ int lr_session_open(uint16_t cols, uint16_t rows, const char *command) {
 }
 
 int lr_session_write(int id, const uint8_t *data, size_t len) {
+    if (len >= 3 && memcmp(data, "die", 3) == 0) { dead[id % 64] = 1; return 0; }
     for (size_t i = 0; i < len; i++) {
         if (data[i] == '\r') say(id, "\r\nno Linux here\r\n$ ");
         else if (cb) cb(id, &data[i], 1, user); // echo
@@ -47,5 +49,7 @@ int lr_session_write(int id, const uint8_t *data, size_t len) {
 }
 
 int lr_session_resize(int id, uint16_t cols, uint16_t rows) { (void) id; (void) cols; (void) rows; return 0; }
+
+int lr_session_alive(int id) { return !dead[id % 64]; }
 
 void lr_session_close(int id) { if (cb) cb(id, NULL, 0, user); }

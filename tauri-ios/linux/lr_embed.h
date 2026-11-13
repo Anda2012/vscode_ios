@@ -25,6 +25,8 @@ int lr_session_open(uint16_t cols, uint16_t rows, const char *command);
 int lr_session_write(int session, const uint8_t *data, size_t len);
 int lr_session_resize(int session, uint16_t cols, uint16_t rows);
 void lr_session_close(int session);
+// 1 while the session's process is running, 0 once it has exited (or the session is gone).
+int lr_session_alive(int session);
 
 #ifdef __cplusplus
 }

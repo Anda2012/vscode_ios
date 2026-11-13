@@ -19,6 +19,7 @@ extern "C" {
     fn lr_session_write(session: c_int, data: *const u8, len: usize) -> c_int;
     fn lr_session_resize(session: c_int, cols: u16, rows: u16) -> c_int;
     fn lr_session_close(session: c_int);
+    fn lr_session_alive(session: c_int) -> c_int;
 }
 
 #[derive(Default)]
@@ -97,8 +98,15 @@ fn tail_of(id: i32) -> String {
     String::from_utf8_lossy(&bytes).replace('\r', "")
 }
 
+fn alive(id: i32) -> bool {
+    unsafe { lr_session_alive(id) != 0 }
+}
+
+/// A session is over when the core said so, or when its process has exited (the core reports that only
+/// through the pty state, not through a callback).
 fn session_closed(id: i32) -> bool {
-    out_for(id).state.lock().unwrap().1
+    let flagged = out_for(id).state.lock().unwrap().1;
+    flagged || !alive(id)
 }
 
 /// Runs one command to completion in a throwaway session and returns its output.
@@ -341,21 +349,43 @@ impl Terminal for Linux {
 
     fn read(&self, id: i32, wait: Duration) -> ReadResult {
         let out = out_for(id);
-        let mut st = out.state.lock().unwrap();
-        if st.0.is_empty() && !st.1 {
-            st = out.cv.wait_timeout(st, wait).unwrap().0;
-        }
-        if !st.0.is_empty() {
-            return ReadResult::Data(st.0.drain(..).collect());
-        }
-        if st.1 {
-            drop(st);
+        let deadline = Instant::now() + wait;
+        let forget = || {
             if let Some(map) = OUTPUTS.lock().unwrap().as_mut() {
                 map.remove(&id); // session is over and fully read
             }
-            ReadResult::Closed
-        } else {
-            ReadResult::Timeout
+        };
+        loop {
+            {
+                let mut st = out.state.lock().unwrap();
+                if st.0.is_empty() && !st.1 {
+                    let slice = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(500));
+                    if !slice.is_zero() {
+                        st = out.cv.wait_timeout(st, slice).unwrap().0;
+                    }
+                }
+                if !st.0.is_empty() {
+                    return ReadResult::Data(st.0.drain(..).collect());
+                }
+                if st.1 {
+                    drop(st);
+                    forget();
+                    return ReadResult::Closed;
+                }
+            }
+            // Checked without holding our lock: the core takes its own locks inside.
+            if !alive(id) {
+                let mut st = out.state.lock().unwrap();
+                if !st.0.is_empty() {
+                    return ReadResult::Data(st.0.drain(..).collect());
+                }
+                drop(st);
+                forget();
+                return ReadResult::Closed;
+            }
+            if Instant::now() >= deadline {
+                return ReadResult::Timeout;
+            }
         }
     }
 
