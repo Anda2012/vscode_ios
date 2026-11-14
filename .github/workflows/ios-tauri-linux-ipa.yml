@@ -35,6 +35,18 @@ jobs:
             --include=ca-certificates,curl,bash,coreutils,python3,nano,less,git,openssh-client,procps \
             noble ubuntu-rootfs http://ports.ubuntu.com/ubuntu-ports
           sudo mkdir -p ubuntu-rootfs/root ubuntu-rootfs/mnt/vscode
+          # PID 1 inside the app: reaps exited children (otherwise they stay zombies and keep their terminal open)
+          sudo mkdir -p ubuntu-rootfs/usr/local/sbin
+          sudo tee ubuntu-rootfs/usr/local/sbin/vscode-init >/dev/null <<'INIT_PY'
+          #!/usr/bin/python3
+          import os, time
+          while True:
+              try:
+                  os.wait()
+              except ChildProcessError:
+                  time.sleep(1)
+          INIT_PY
+          sudo chmod 0755 ubuntu-rootfs/usr/local/sbin/vscode-init
           printf 'nameserver 1.1.1.1\n' | sudo tee ubuntu-rootfs/etc/resolv.conf >/dev/null
           printf 'vscode\n' | sudo tee ubuntu-rootfs/etc/hostname >/dev/null
           printf 'deb http://ports.ubuntu.com/ubuntu-ports noble main universe\n' | sudo tee ubuntu-rootfs/etc/apt/sources.list >/dev/null

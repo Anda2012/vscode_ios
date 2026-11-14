@@ -26,7 +26,9 @@ int fakefs_bind_mount_set_owner(const char *linux_path, uint32_t uid, uint32_t g
 
 struct session {
     int id;                 // 0 = the hidden init session (output discarded)
-    struct tty *tty;        // pty master side; NULL once the guest side is gone
+    struct tty *tty;        // the guest-facing tty; NULL once it has been cleaned up
+    pid_t pid;              // guest pid of the session's process
+    volatile int exited;    // set by the exit hook when that process ended
     volatile int in_use;
 };
 
@@ -131,6 +133,23 @@ static void apply_binds(const char *binds) {
     free(copy);
 }
 
+// Called by the core (with pids_lock held) when a process group leader exits. The core marks the process
+// a zombie but never closes the tty until it is reaped, so this hook is how the app learns a session ended
+// (the core's own iOS app does the same). It must not call back into the core.
+static void lr_exit_hook(struct task *task, int code) {
+    (void) code;
+    if (task->parent != NULL && task->parent->parent != NULL)
+        return; // only init and direct children of init are sessions
+    pid_t pid = task->pid;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (sessions[i].in_use && sessions[i].id > 0 && sessions[i].pid == pid && !sessions[i].exited) {
+            sessions[i].exited = 1;
+            if (out_cb != NULL)
+                out_cb(sessions[i].id, NULL, 0, out_user);
+        }
+    }
+}
+
 static struct session *alloc_session(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!sessions[i].in_use) {
@@ -191,6 +210,7 @@ static int start_process(struct session *s, int adopt_current, uint16_t cols, ui
     err = do_execve(argv, (size_t) argc, argv, envp);
     if (err < 0)
         goto fail;
+    s->pid = current->pid;
     err = task_start(current);
     if (err < 0)
         goto fail;
@@ -213,6 +233,7 @@ int lr_boot(const char *fakefs_dir, const char *binds, const char *tmp_dir, lr_o
     }
     out_cb = cb;
     out_user = user;
+    exit_hook = lr_exit_hook;
 
     snprintf(sock_prefix, sizeof(sock_prefix), "%ss", tmp_dir != NULL ? tmp_dir : "/tmp/");
     sock_tmp_prefix = sock_prefix;
@@ -259,7 +280,13 @@ int lr_boot(const char *fakefs_dir, const char *binds, const char *tmp_dir, lr_o
         return -ENOMEM;
     }
     init->id = 0;
-    err = start_process(init, 1, 80, 24, "/bin/sleep infinity");
+    const char *init_cmd = "/bin/sleep infinity";
+    struct fd *reaper = generic_open("/usr/local/sbin/vscode-init", O_RDONLY_, 0);
+    if (!IS_ERR(reaper)) {
+        fd_close(reaper);
+        init_cmd = "/usr/bin/python3 /usr/local/sbin/vscode-init";
+    }
+    err = start_process(init, 1, 80, 24, init_cmd);
     pthread_mutex_unlock(&big_lock);
     if (err < 0)
         return err;
@@ -313,18 +340,8 @@ int lr_session_resize(int session, uint16_t cols, uint16_t rows) {
 }
 
 int lr_session_alive(int session) {
-    // Same test the core uses for a "half-closed" pty master: the slave was opened and now only the
-    // master's own reference is left (the process closed its stdio), or the slave was hung up.
     struct session *s = find_session(session);
-    if (s == NULL || s->tty == NULL)
-        return 0;
-    struct tty *slave = s->tty->pty.other;
-    if (slave == NULL)
-        return 0;
-    lock(&slave->lock);
-    int gone = slave->ever_opened && (slave->refcount == 1 || slave->hung_up);
-    unlock(&slave->lock);
-    return !gone;
+    return s != NULL && !s->exited;
 }
 
 void lr_session_close(int session) {
